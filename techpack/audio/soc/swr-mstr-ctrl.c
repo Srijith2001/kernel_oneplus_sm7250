@@ -1748,7 +1748,6 @@ static void swrm_enable_slave_irq(struct swr_mstr_ctrl *swrm)
 {
 	int i;
 	int status = 0;
-	u32 temp;
 
 	status = swr_master_read(swrm, SWRM_MCP_SLV_STATUS);
 	if (!status) {
@@ -1760,8 +1759,6 @@ static void swrm_enable_slave_irq(struct swr_mstr_ctrl *swrm)
 	for (i = 0; i < (swrm->master.num_dev + 1); i++) {
 		if (status & SWRM_MCP_SLV_STATUS_MASK) {
 			if (!swrm->clk_stop_wakeup) {
-				swrm_cmd_fifo_rd_cmd(swrm, &temp, i, 0x0,
-					SWRS_SCP_INT_STATUS_CLEAR_1, 1);
 				swrm_cmd_fifo_wr_cmd(swrm, 0xFF, i, 0x0,
 					SWRS_SCP_INT_STATUS_CLEAR_1);
 			}
@@ -2078,7 +2075,10 @@ handle_irq:
 					 * as hw will mask host_irq at slave
 					 * but will not unmask it afterwards.
 					 */
-					swrm->enable_slave_irq = true;
+					swrm_cmd_fifo_wr_cmd(swrm, 0xFF, devnum, 0x0,
+						SWRS_SCP_INT_STATUS_CLEAR_1);
+					swrm_cmd_fifo_wr_cmd(swrm, 0x4, devnum, 0x0,
+						SWRS_SCP_INT_STATUS_MASK_1);
 				}
 				break;
 			case SWR_ATTACHED_OK:
@@ -2086,7 +2086,11 @@ handle_irq:
 					"%s: device %d got attached\n",
 					__func__, devnum);
 				/* enable host irq from slave device*/
-				swrm->enable_slave_irq = true;
+				swrm_cmd_fifo_wr_cmd(swrm, 0xFF, devnum, 0x0,
+					SWRS_SCP_INT_STATUS_CLEAR_1);
+				swrm_cmd_fifo_wr_cmd(swrm, 0x4, devnum, 0x0,
+					SWRS_SCP_INT_STATUS_MASK_1);
+
 				break;
 			case SWR_ALERT:
 				dev_dbg(swrm->dev,
@@ -2163,23 +2167,22 @@ handle_irq:
 		case SWRM_INTERRUPT_STATUS_CLK_STOP_FINISHED_V2:
 			break;
 		case SWRM_INTERRUPT_STATUS_EXT_CLK_STOP_WAKEUP:
-			if (swrm->state == SWR_MSTR_UP) {
+			if (swrm->state == SWR_MSTR_UP)
 				dev_dbg(swrm->dev,
 					"%s:SWR Master is already up\n",
 					__func__);
-			} else {
+			else
 				dev_err_ratelimited(swrm->dev,
 					"%s: SWR wokeup during clock stop\n",
 					__func__);
-				/* It might be possible the slave device gets
-				 * reset and slave interrupt gets missed. So
-				 * re-enable Host IRQ and process slave pending
-				 * interrupts, if any.
-				 */
-				swrm->clk_stop_wakeup = true;
-				swrm_enable_slave_irq(swrm);
-				swrm->clk_stop_wakeup = false;
-			}
+			/* It might be possible the slave device gets
+			 * reset and slave interrupt gets missed. So
+			 * re-enable Host IRQ and process slave pending
+			 * interrupts, if any.
+			 */
+			swrm->clk_stop_wakeup = true;
+			swrm_enable_slave_irq(swrm);
+			swrm->clk_stop_wakeup = false;
 			break;
 		default:
 			dev_err_ratelimited(swrm->dev,
@@ -2191,12 +2194,6 @@ handle_irq:
 	}
 	swr_master_write(swrm, SWRM_INTERRUPT_CLEAR, intr_sts);
 	swr_master_write(swrm, SWRM_INTERRUPT_CLEAR, 0x0);
-
-	if (swrm->enable_slave_irq) {
-		/* Enable slave irq here */
-		swrm_enable_slave_irq(swrm);
-		swrm->enable_slave_irq = false;
-	}
 
 	intr_sts = swr_master_read(swrm, SWRM_INTERRUPT_STATUS);
 	intr_sts_masked = intr_sts & swrm->intr_mask;
@@ -2484,6 +2481,9 @@ static int swrm_master_init(struct swr_mstr_ctrl *swrm)
 	reg[len] = SWRM_COMP_CFG_ADDR;
 	value[len++] = 0x02;
 
+	reg[len] = SWRM_COMP_CFG_ADDR;
+	value[len++] = 0x03;
+
 	reg[len] = SWRM_INTERRUPT_CLEAR;
 	value[len++] = 0xFFFFFFFF;
 
@@ -2494,9 +2494,6 @@ static int swrm_master_init(struct swr_mstr_ctrl *swrm)
 
 	reg[len] = SWR_MSTR_RX_SWRM_CPU_INTERRUPT_EN;
 	value[len++] = swrm->intr_mask;
-
-	reg[len] = SWRM_COMP_CFG_ADDR;
-	value[len++] = 0x03;
 
 	swr_master_bulk_write(swrm, reg, value, len);
 
@@ -2670,8 +2667,6 @@ static int swrm_probe(struct platform_device *pdev)
 				SWRM_NUM_AUTO_ENUM_SLAVES);
 			ret = -EINVAL;
 			goto err_pdata_fail;
-		} else {
-			swrm->master.num_dev = swrm->num_dev;
 		}
 	}
 
